@@ -7,6 +7,16 @@ on:
         description: "Study topic"
         required: true
         type: string
+      background_group:
+        description: "Background series (part, partty, 1, 2, 5, 6)"
+        required: false
+        default: "part"
+        type: string
+      manual_script:
+        description: "Optional: paste script JSON to skip research + LLM entirely"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   generate:
@@ -15,11 +25,26 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
     steps:
+      # Only the scripts are checked out up front. Blobs are fetched on demand so
+      # the 30-odd background clips don't all download on every run.
       - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout: |
+            scripts
+            requirements.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch only the selected background series
+        run: |
+          git sparse-checkout add "assets/${{ inputs.background_group }}*"
+          echo "Clips fetched:"
+          ls -la assets/ | head -20
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
@@ -27,12 +52,23 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
+      - name: Use supplied script
+        if: inputs.manual_script != ''
+        run: |
+          mkdir -p build
+          cat > build/script.json <<'SCRIPT_JSON'
+          ${{ inputs.manual_script }}
+          SCRIPT_JSON
+          python -c "import json;d=json.load(open('build/script.json'));print(f'{len(d[\"chunks\"])} chunks supplied')"
+
       - name: Research
+        if: inputs.manual_script == ''
         env:
           TOPIC: ${{ inputs.topic }}
         run: python scripts/research.py
 
       - name: Generate script
+        if: inputs.manual_script == ''
         env:
           TOPIC: ${{ inputs.topic }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -41,15 +77,19 @@ jobs:
         run: python scripts/script_gen.py
 
       - name: Generate voiceover
+        env:
+          TTS_VOICE: ${{ vars.TTS_VOICE }}
+          TTS_RATE: ${{ vars.TTS_RATE }}
         run: python scripts/voice_gen.py
 
       - name: Assemble video
         env:
-          BACKGROUND_GROUP: ${{ vars.BACKGROUND_GROUP }}
+          BACKGROUND_GROUP: ${{ inputs.background_group }}
+          MAX_VIDEO_SECONDS: ${{ vars.MAX_VIDEO_SECONDS }}
         run: python scripts/assemble.py
 
       - uses: actions/upload-artifact@v4
         with:
           name: study-video-${{ github.run_id }}
-          path: build/output.mp4
+          path: build/output_*.mp4
           retention-days: 14
