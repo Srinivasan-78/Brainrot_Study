@@ -74,10 +74,30 @@ def make_segment(index, audio_path, boundaries_path, background_path, out_path):
     if boundaries:
         srt_path = f"{SEGMENTS_DIR}/chunk_{index:02d}.srt"
         build_srt(boundaries, srt_path)
-        style = "FontSize=20,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Alignment=2"
+        # FFmpeg renders SRT on a default 384x288 ASS canvas that libass then scales
+        # to the video height, so FontSize is in THAT space, not in output pixels.
+        # Alignment uses legacy SSA numbering: 10 = middle-centre.
+        style = ",".join([
+            "FontName=DejaVu Sans",
+            "FontSize=28",
+            "Bold=1",
+            "PrimaryColour=&H00FFFFFF",
+            "OutlineColour=&H00000000",
+            "BorderStyle=1",
+            "Outline=2",
+            "Shadow=1",
+            "Alignment=10",
+            "MarginL=30",
+            "MarginR=30",
+        ])
         vf = f"{base_vf},subtitles={srt_path}:force_style='{style}'"
     else:
-        vf = base_vf
+        print(
+            f"ERROR: chunk {index} has no word-boundary data — captions would be missing. "
+            f"Check that voice_gen.py wrote {boundaries_path} with events.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     cmd = [
         "ffmpeg", "-y",
