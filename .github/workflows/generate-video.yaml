@@ -78,14 +78,14 @@ jobs:
 
       - name: Generate voiceover
         env:
-          TTS_VOICE: ${{ vars.TTS_VOICE }}
-          TTS_RATE: ${{ vars.TTS_RATE }}
+          TTS_VOICE: ${{ vars.TTS_VOICE || 'en-US-ChristopherNeural' }}
+          TTS_RATE: ${{ vars.TTS_RATE || '+15%' }}
         run: python scripts/voice_gen.py
 
       - name: Assemble video
         env:
           BACKGROUND_GROUP: ${{ inputs.background_group }}
-          MAX_VIDEO_SECONDS: ${{ vars.MAX_VIDEO_SECONDS }}
+          MAX_VIDEO_SECONDS: ${{ vars.MAX_VIDEO_SECONDS || '55' }}
         run: python scripts/assemble.py
 
       - uses: actions/upload-artifact@v4
