@@ -4,12 +4,45 @@ import os
 import sys
 import json
 import asyncio
+import subprocess
 import traceback
 import edge_tts
 
-VOICE = os.environ.get("TTS_VOICE", "en-US-AndrewNeural")
+# NOTE: the newer conversational voices (Andrew, Ava, Emma, Brian) do NOT emit
+# WordBoundary metadata, so captions cannot be timed from them. Classic neural
+# voices (Christopher, Guy, Aria, Jenny, Eric) do.
+VOICE = os.environ.get("TTS_VOICE", "en-US-ChristopherNeural")
 CHUNK_TIMEOUT = int(os.environ.get("TTS_TIMEOUT", "90"))
 MAX_ATTEMPTS = 3
+
+
+def audio_duration(path):
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True, check=True,
+    )
+    return float(out.stdout.strip())
+
+
+def estimate_boundaries(text, duration):
+    """Fallback timings when the voice emits no WordBoundary events.
+
+    Distributes the real audio duration across words in proportion to their
+    length. Less accurate than real boundaries but keeps captions usable.
+    """
+    words = text.split()
+    if not words:
+        return []
+    weights = [len(w) + 1 for w in words]
+    total = sum(weights)
+    boundaries = []
+    cursor = 0.0
+    for word, weight in zip(words, weights):
+        span = duration * (weight / total)
+        boundaries.append({"text": word, "offset_s": cursor, "duration_s": span})
+        cursor += span
+    return boundaries
 
 
 async def synth_chunk(text, audio_path, boundaries_path):
@@ -31,9 +64,15 @@ async def synth_chunk(text, audio_path, boundaries_path):
                 )
     if audio_bytes == 0:
         raise RuntimeError("edge-tts returned no audio data")
+
+    estimated = False
+    if not boundaries:
+        boundaries = estimate_boundaries(text, audio_duration(audio_path))
+        estimated = True
+
     with open(boundaries_path, "w", encoding="utf-8") as f:
         json.dump(boundaries, f, indent=2)
-    return len(boundaries), audio_bytes
+    return len(boundaries), audio_bytes, estimated
 
 
 async def synth_with_retry(i, text, audio_path, boundaries_path):
@@ -77,17 +116,22 @@ async def main_async():
         boundaries_path = f"build/audio/chunk_{i:02d}.json"
         print(f"[voice_gen] chunk {i + 1}/{len(chunks)}: {len(text.split())} words...", flush=True)
 
-        n_words, n_bytes = await synth_with_retry(i, text, audio_path, boundaries_path)
+        n_words, n_bytes, estimated = await synth_with_retry(
+            i, text, audio_path, boundaries_path
+        )
 
         if n_words == 0:
+            print(f"ERROR: chunk {i} yielded no timings at all", file=sys.stderr, flush=True)
+            sys.exit(1)
+        source = "estimated" if estimated else "from voice"
+        print(f"[voice_gen]   ok: {n_bytes} bytes, {n_words} word timings ({source})", flush=True)
+        if estimated and i == 0:
             print(
-                f"ERROR: chunk {i} produced no WordBoundary events — captions cannot be timed. "
-                f"Try a different TTS_VOICE or upgrade edge-tts.",
-                file=sys.stderr,
+                f"[voice_gen] NOTE: voice '{VOICE}' emits no WordBoundary events; "
+                f"caption timings are estimated. Use a classic voice "
+                f"(en-US-ChristopherNeural, en-US-GuyNeural, en-US-AriaNeural) for exact timing.",
                 flush=True,
             )
-            sys.exit(1)
-        print(f"[voice_gen]   ok: {n_bytes} bytes, {n_words} word boundaries", flush=True)
 
     print(f"[voice_gen] wrote {len(chunks)} audio files to build/audio/", flush=True)
 
