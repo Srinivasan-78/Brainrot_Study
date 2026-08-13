@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import re
 import glob
 import random
 import subprocess
@@ -33,13 +34,49 @@ def get_duration(path):
     return float(out.strip())
 
 
-def list_backgrounds():
-    candidates = sorted(glob.glob(f"{BACKGROUND_DIR}/*.mp4") + glob.glob(f"{BACKGROUND_DIR}/*.mov"))
+def background_groups():
+    """Group clips into series by filename prefix.
+
+    part_00..part_18 form one continuous series, partty_00..partty_07 another,
+    and bare-numeric files (1.mp4, 2.mp4) are each standalone. Returns
+    {group_name: [paths in numeric order]}.
+    """
+    candidates = glob.glob(f"{BACKGROUND_DIR}/*.mp4") + glob.glob(f"{BACKGROUND_DIR}/*.mov")
     if not candidates:
         print(f"ERROR: no background loop videos found in {BACKGROUND_DIR}/", file=sys.stderr)
         sys.exit(1)
-    print(f"[assemble] {len(candidates)} background clips available")
-    return candidates
+
+    groups = {}
+    for path in candidates:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        m = re.match(r"^(.*?)[_-]?(\d+)$", stem)
+        if m and m.group(1):
+            name, order = m.group(1), int(m.group(2))
+        else:
+            name, order = stem, 0
+        groups.setdefault(name, []).append((order, path))
+
+    return {name: [p for _, p in sorted(items)] for name, items in groups.items()}
+
+
+def pick_series():
+    """Choose one series to use for the whole video, honouring BACKGROUND_GROUP."""
+    groups = background_groups()
+    forced = os.environ.get("BACKGROUND_GROUP")
+    if forced:
+        if forced not in groups:
+            print(
+                f"ERROR: BACKGROUND_GROUP='{forced}' not found. Available: {sorted(groups)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        name = forced
+    else:
+        name = random.choice(sorted(groups))
+
+    playlist = groups[name]
+    print(f"[assemble] background series '{name}': {len(playlist)} clip(s), played in order")
+    return playlist
 
 
 def srt_timestamp(seconds):
@@ -64,7 +101,14 @@ def build_srt(boundaries, srt_path):
             f.write(f"{idx}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{text}\n\n")
 
 
-def make_segment(index, audio_path, boundaries_path, background_path, out_path, seek=0.0):
+def write_concat_list(paths, list_path):
+    with open(list_path, "w", encoding="utf-8") as f:
+        for p in paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    return list_path
+
+
+def make_segment(index, audio_path, boundaries_path, bg_list, out_path, seek=0.0):
     duration = get_duration(audio_path)
 
     with open(boundaries_path, encoding="utf-8") as f:
@@ -76,18 +120,18 @@ def make_segment(index, audio_path, boundaries_path, background_path, out_path, 
         build_srt(boundaries, srt_path)
         # FFmpeg renders SRT on a default 384x288 ASS canvas that libass then scales
         # to the video height, so FontSize is in THAT space, not in output pixels.
-        # Alignment uses legacy SSA numbering: 10 = middle-centre.
+        # Alignment uses legacy SSA numbering: 2 = bottom-centre.
         style = ",".join([
             "FontName=DejaVu Sans",
-            "FontSize=22",
+            "FontSize=16",
             "Bold=1",
             "PrimaryColour=&H00FFFFFF",
             "OutlineColour=&H00000000",
             "BorderStyle=1",
             "Outline=2",
-            "MarginV=40",
+            "MarginV=60",
             "Shadow=1",
-            "Alignment=10",
+            "Alignment=2",
             "MarginL=30",
             "MarginR=30",
         ])
@@ -102,9 +146,10 @@ def make_segment(index, audio_path, boundaries_path, background_path, out_path, 
 
     cmd = [
         "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
         "-stream_loop", "-1",
         "-ss", f"{seek:.3f}",
-        "-i", background_path,
+        "-i", bg_list,
         "-i", audio_path,
         "-vf", vf,
         "-map", "0:v:0", "-map", "1:a:0",
@@ -137,16 +182,17 @@ def main():
         data = json.load(f)
     n_chunks = len(data["chunks"])
 
-    backgrounds = list_backgrounds()
-    bg_durations = {b: get_duration(b) for b in backgrounds}
+    playlist = pick_series()
     os.makedirs(SEGMENTS_DIR, exist_ok=True)
 
-    # Rotate through the clips in shuffled order and keep advancing into each one,
-    # so no segment replays footage an earlier segment already showed.
-    order = backgrounds[:]
-    random.shuffle(order)
-    cursors = {b: random.uniform(0, max(bg_durations[b] - 1, 0)) for b in backgrounds}
+    # Treat the whole series as ONE continuous input via the concat demuxer, so a
+    # segment can run across a clip boundary and the cursor just advances through
+    # the series timeline. Safe within a series because the clips share encoding.
+    bg_list = write_concat_list(playlist, f"{BUILD_DIR}/bg_list.txt")
+    series_duration = sum(get_duration(p) for p in playlist)
+    print(f"[assemble] series timeline: {series_duration:.0f}s total")
 
+    seek = 0.0
     segment_paths = []
     for i in range(n_chunks):
         audio_path = f"{AUDIO_DIR}/chunk_{i:02d}.mp3"
@@ -156,11 +202,9 @@ def main():
             print(f"ERROR: missing audio file {audio_path}", file=sys.stderr)
             sys.exit(1)
 
-        bg = order[i % len(order)]
-        seek = cursors[bg]
-        print(f"[assemble] segment {i + 1}/{n_chunks}: {os.path.basename(bg)} @ {seek:.1f}s")
-        used = make_segment(i, audio_path, boundaries_path, bg, out_path, seek=seek)
-        cursors[bg] = (seek + used) % max(bg_durations[bg], 1.0)
+        print(f"[assemble] segment {i + 1}/{n_chunks}: series @ {seek:.1f}s")
+        used = make_segment(i, audio_path, boundaries_path, bg_list, out_path, seek=seek)
+        seek = (seek + used) % series_duration
         segment_paths.append(out_path)
 
     final_path = f"{BUILD_DIR}/output.mp4"
