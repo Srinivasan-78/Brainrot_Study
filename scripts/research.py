@@ -7,6 +7,11 @@ import requests
 
 WIKI_API_URL = "https://en.wikipedia.org/w/api.php"
 
+SESSION = requests.Session()
+SESSION.headers.update(
+    {"User-Agent": "StudyBrainrotGenerator/1.0 (personal study project; https://github.com)"}
+)
+
 
 def wiki_search(topic, limit=3):
     params = {
@@ -16,7 +21,7 @@ def wiki_search(topic, limit=3):
         "format": "json",
         "srlimit": limit,
     }
-    r = requests.get(WIKI_API_URL, params=params, timeout=15)
+    r = SESSION.get(WIKI_API_URL, params=params, timeout=15)
     r.raise_for_status()
     return [item["title"] for item in r.json()["query"]["search"]]
 
@@ -29,7 +34,7 @@ def wiki_extract(title):
         "titles": title,
         "format": "json",
     }
-    r = requests.get(WIKI_API_URL, params=params, timeout=15)
+    r = SESSION.get(WIKI_API_URL, params=params, timeout=15)
     r.raise_for_status()
     pages = r.json()["query"]["pages"]
     page = next(iter(pages.values()))
