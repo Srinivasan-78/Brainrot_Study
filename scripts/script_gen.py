@@ -45,30 +45,54 @@ def strip_fences(s):
     return s.strip()
 
 
-def resolve_gemini_model(client):
-    """Model names churn; prefer an env override, else discover a Flash model at runtime."""
+EXCLUDE_TOKENS = (
+    "preview", "-exp", "experimental", "omni", "thinking", "tts",
+    "audio", "image", "live", "embedding", "learnlm", "gemma", "vision",
+)
+
+
+def rank_gemini_models(client):
+    """Return candidate model names, best free-tier bet first.
+
+    Preview/experimental models frequently report a free-tier quota of 0, so they
+    are ranked last and only used if nothing stable is available.
+    """
     override = os.environ.get("GEMINI_MODEL")
     if override:
-        return override
+        return [override]
 
     try:
-        names = [
-            m.name.replace("models/", "")
-            for m in client.models.list()
-            if "generateContent" in getattr(m, "supported_actions", []) or True
-        ]
+        names = [m.name.replace("models/", "") for m in client.models.list()]
     except Exception as e:
-        print(f"[script_gen] WARNING: could not list Gemini models ({e}); using default", file=sys.stderr)
-        return "gemini-flash-latest"
+        print(f"[script_gen] WARNING: could not list Gemini models ({e})", file=sys.stderr)
+        names = []
 
-    flash = [n for n in names if "flash" in n and "lite" not in n and "image" not in n]
-    lite = [n for n in names if "flash" in n and "lite" in n]
-    pool = flash or lite or names
-    if not pool:
-        return "gemini-flash-latest"
-    chosen = sorted(pool, reverse=True)[0]
-    print(f"[script_gen] resolved Gemini model: {chosen}")
-    return chosen
+    names = [n for n in names if n.startswith("gemini")]
+
+    def score(name):
+        stable = not any(t in name for t in EXCLUDE_TOKENS)
+        is_flash = "flash" in name
+        is_lite = "lite" in name
+        is_alias = name.endswith("-latest")
+        # lower sorts first
+        return (
+            0 if stable else 1,
+            0 if is_flash else 1,
+            0 if is_lite else 1,   # lite has the most generous free RPM
+            0 if is_alias else 1,
+            name,
+        )
+
+    ranked = sorted(set(names), key=score)
+    fallbacks = ["gemini-flash-lite-latest", "gemini-flash-latest"]
+    for fb in fallbacks:
+        if fb not in ranked:
+            ranked.append(fb)
+
+    if not ranked:
+        ranked = fallbacks
+    print(f"[script_gen] Gemini candidates: {ranked[:5]}")
+    return ranked[:5]
 
 
 def call_gemini(prompt, api_key):
@@ -76,28 +100,35 @@ def call_gemini(prompt, api_key):
     from google.genai import types, errors
 
     client = genai.Client(api_key=api_key)
-    model_name = resolve_gemini_model(client)
+    candidates = rank_gemini_models(client)
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        response_mime_type="application/json",
+    )
 
     last_err = None
     for attempt in range(1, 3):
-        try:
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                ),
-            )
-            return strip_fences(resp.text)
-        except errors.ClientError as e:
-            code = getattr(e, "code", None) or getattr(e, "status_code", None)
-            if code != 429:
-                raise  # 404/400/403 are config errors — fail fast, don't burn retries
-            last_err = e
-            print(f"[script_gen] Gemini rate/quota limit hit (attempt {attempt}/2): {e}", file=sys.stderr)
-            if attempt < 2:
-                time.sleep(5)
+        for model_name in candidates:
+            try:
+                resp = client.models.generate_content(
+                    model=model_name, contents=prompt, config=config
+                )
+                print(f"[script_gen] Gemini succeeded with {model_name}")
+                return strip_fences(resp.text)
+            except errors.ClientError as e:
+                code = getattr(e, "code", None) or getattr(e, "status_code", None)
+                if code == 429:
+                    last_err = e
+                    print(f"[script_gen] {model_name}: quota exhausted, trying next model", file=sys.stderr)
+                    continue
+                if code == 404:
+                    last_err = e
+                    print(f"[script_gen] {model_name}: not available, trying next model", file=sys.stderr)
+                    continue
+                raise  # 400/403 are config errors — fail fast
+        if attempt < 2:
+            print(f"[script_gen] all Gemini models exhausted (pass {attempt}/2), waiting 40s", file=sys.stderr)
+            time.sleep(40)
     raise last_err
 
 
