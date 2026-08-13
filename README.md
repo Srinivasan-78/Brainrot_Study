@@ -10,14 +10,3 @@ Solo GitHub Actions pipeline: give it a study topic, get back a captioned MP4 as
 
 ## Pipeline
 `research.py` (Wikipedia) → `script_gen.py` (Gemini, falls back to DeepSeek on rate-limit) → `voice_gen.py` (Edge-TTS + word timings) → `assemble.py` (FFmpeg captions + concat) → `build/output.mp4`.
-
-## Local testing
-```
-pip install -r requirements.txt
-export TOPIC="mitochondria" GEMINI_API_KEY=...
-python scripts/research.py
-python scripts/script_gen.py
-python scripts/voice_gen.py
-# put a test clip in assets/ first
-python scripts/assemble.py
-```
