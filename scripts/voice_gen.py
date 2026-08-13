@@ -26,6 +26,7 @@ async def synth_chunk(text, audio_path, boundaries_path):
                 )
     with open(boundaries_path, "w", encoding="utf-8") as f:
         json.dump(boundaries, f, indent=2)
+    return len(boundaries)
 
 
 async def main_async():
@@ -41,10 +42,18 @@ async def main_async():
         boundaries_path = f"build/audio/chunk_{i:02d}.json"
         print(f"[voice_gen] synthesizing chunk {i + 1}/{len(chunks)}...")
         try:
-            await synth_chunk(text, audio_path, boundaries_path)
+            n_words = await synth_chunk(text, audio_path, boundaries_path)
         except Exception as e:
             print(f"ERROR: TTS failed on chunk {i}: {e}", file=sys.stderr)
             sys.exit(1)
+        if n_words == 0:
+            print(
+                f"ERROR: chunk {i} produced no WordBoundary events — captions cannot be timed. "
+                f"Try a different TTS_VOICE or upgrade edge-tts.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"[voice_gen]   {n_words} word boundaries captured")
 
     print(f"[voice_gen] wrote {len(chunks)} audio files to build/audio/")
 
