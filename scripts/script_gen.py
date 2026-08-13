@@ -6,14 +6,18 @@ import json
 import time
 
 SYSTEM_PROMPT = """You are a study-content scriptwriter for short vertical educational videos.
-Given source material on a topic, produce 8 to 12 short concept chunks that teach the topic
+Given source material on a topic, produce 12 concept chunks that teach the topic
 in a punchy, fast-paced "brainrot style" — short sentences, high energy, no fluff.
+
+Each chunk must be 25-35 words: these are spoken aloud at speed, and chunks are packed
+into videos of under a minute each, so brevity matters more than completeness.
+Chunk 1 must open with a hook that makes someone stop scrolling.
 
 Return ONLY valid JSON, no markdown fences, no commentary, matching this schema exactly:
 {
   "topic": "<string>",
   "chunks": [
-    {"text": "<40-60 word explanation, spoken style>", "quiz": "<optional short quiz question, or null>"}
+    {"text": "<25-35 word explanation, spoken style>"}
   ]
 }
 """
@@ -27,12 +31,15 @@ def validate(data):
     if not isinstance(data, dict) or "chunks" not in data:
         raise ValueError("missing 'chunks' key")
     chunks = data["chunks"]
-    if not isinstance(chunks, list) or not (8 <= len(chunks) <= 12):
+    if not isinstance(chunks, list) or not (6 <= len(chunks) <= 16):
         got = len(chunks) if isinstance(chunks, list) else "non-list"
-        raise ValueError(f"expected 8-12 chunks, got {got}")
+        raise ValueError(f"expected 6-16 chunks, got {got}")
     for i, c in enumerate(chunks):
         if "text" not in c or not isinstance(c["text"], str) or not c["text"].strip():
             raise ValueError(f"chunk {i} missing/empty 'text'")
+        words = len(c["text"].split())
+        if words > 60:
+            raise ValueError(f"chunk {i} is {words} words — far over the 25-35 target")
     return data
 
 
@@ -212,11 +219,17 @@ def main():
         sys.exit(1)
 
     data.setdefault("topic", topic)
+
+    chunks = data["chunks"]
     os.makedirs("build", exist_ok=True)
     with open("build/script.json", "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-    print(f"[script_gen] wrote build/script.json via {provider_used} ({len(data['chunks'])} chunks)")
+    words = sum(len(c["text"].split()) for c in chunks)
+    print(
+        f"[script_gen] wrote build/script.json via {provider_used}: "
+        f"{len(chunks)} chunks, ~{words} words (~{words / 2.5:.0f}s of speech)"
+    )
 
 
 if __name__ == "__main__":
