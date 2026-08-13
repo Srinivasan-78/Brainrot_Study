@@ -11,8 +11,9 @@ import edge_tts
 # NOTE: the newer conversational voices (Andrew, Ava, Emma, Brian) do NOT emit
 # WordBoundary metadata, so captions cannot be timed from them. Classic neural
 # voices (Christopher, Guy, Aria, Jenny, Eric) do.
-VOICE = os.environ.get("TTS_VOICE", "en-US-ChristopherNeural")
-CHUNK_TIMEOUT = int(os.environ.get("TTS_TIMEOUT", "90"))
+VOICE = os.environ.get("TTS_VOICE") or "en-US-ChristopherNeural"
+RATE = os.environ.get("TTS_RATE") or "+15%"   # brainrot pacing
+CHUNK_TIMEOUT = int(os.environ.get("TTS_TIMEOUT") or 90)
 MAX_ATTEMPTS = 3
 
 
@@ -46,7 +47,7 @@ def estimate_boundaries(text, duration):
 
 
 async def synth_chunk(text, audio_path, boundaries_path):
-    communicate = edge_tts.Communicate(text, VOICE)
+    communicate = edge_tts.Communicate(text, VOICE, rate=RATE)
     boundaries = []
     audio_bytes = 0
     with open(audio_path, "wb") as audio_f:
@@ -101,7 +102,11 @@ async def synth_with_retry(i, text, audio_path, boundaries_path):
 
 
 async def main_async():
-    print(f"[voice_gen] starting, edge-tts {getattr(edge_tts, '__version__', 'unknown')}, voice={VOICE}", flush=True)
+    print(
+        f"[voice_gen] starting, edge-tts {getattr(edge_tts, '__version__', 'unknown')}, "
+        f"voice={VOICE}, rate={RATE}",
+        flush=True,
+    )
 
     with open("build/script.json", encoding="utf-8") as f:
         data = json.load(f)
