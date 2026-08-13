@@ -11,7 +11,8 @@ BACKGROUND_DIR = "assets"
 BUILD_DIR = "build"
 AUDIO_DIR = f"{BUILD_DIR}/audio"
 SEGMENTS_DIR = f"{BUILD_DIR}/segments"
-WORDS_PER_CAPTION = 4
+WORDS_PER_CAPTION = 3
+FPS = 30
 
 
 def run(cmd):
@@ -32,14 +33,13 @@ def get_duration(path):
     return float(out.strip())
 
 
-def pick_background():
+def list_backgrounds():
     candidates = sorted(glob.glob(f"{BACKGROUND_DIR}/*.mp4") + glob.glob(f"{BACKGROUND_DIR}/*.mov"))
     if not candidates:
         print(f"ERROR: no background loop videos found in {BACKGROUND_DIR}/", file=sys.stderr)
         sys.exit(1)
-    choice = random.choice(candidates)
-    print(f"[assemble] background: {choice}")
-    return choice
+    print(f"[assemble] {len(candidates)} background clips available")
+    return candidates
 
 
 def srt_timestamp(seconds):
@@ -64,7 +64,7 @@ def build_srt(boundaries, srt_path):
             f.write(f"{idx}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{text}\n\n")
 
 
-def make_segment(index, audio_path, boundaries_path, background_path, out_path):
+def make_segment(index, audio_path, boundaries_path, background_path, out_path, seek=0.0):
     duration = get_duration(audio_path)
 
     with open(boundaries_path, encoding="utf-8") as f:
@@ -79,12 +79,13 @@ def make_segment(index, audio_path, boundaries_path, background_path, out_path):
         # Alignment uses legacy SSA numbering: 10 = middle-centre.
         style = ",".join([
             "FontName=DejaVu Sans",
-            "FontSize=28",
+            "FontSize=22",
             "Bold=1",
             "PrimaryColour=&H00FFFFFF",
             "OutlineColour=&H00000000",
             "BorderStyle=1",
             "Outline=2",
+            "MarginV=40",
             "Shadow=1",
             "Alignment=10",
             "MarginL=30",
@@ -101,16 +102,21 @@ def make_segment(index, audio_path, boundaries_path, background_path, out_path):
 
     cmd = [
         "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", background_path,
+        "-stream_loop", "-1",
+        "-ss", f"{seek:.3f}",
+        "-i", background_path,
         "-i", audio_path,
         "-vf", vf,
         "-map", "0:v:0", "-map", "1:a:0",
         "-t", str(duration),
+        "-r", str(FPS),               # normalise fps so concat -c copy stays valid
         "-c:v", "libx264", "-c:a", "aac",
+        "-ar", "24000", "-ac", "1",   # normalise audio params too
         "-pix_fmt", "yuv420p",
         out_path,
     ]
     run(cmd)
+    return duration
 
 
 def concat_segments(segment_paths, out_path):
@@ -131,8 +137,15 @@ def main():
         data = json.load(f)
     n_chunks = len(data["chunks"])
 
-    background_path = pick_background()
+    backgrounds = list_backgrounds()
+    bg_durations = {b: get_duration(b) for b in backgrounds}
     os.makedirs(SEGMENTS_DIR, exist_ok=True)
+
+    # Rotate through the clips in shuffled order and keep advancing into each one,
+    # so no segment replays footage an earlier segment already showed.
+    order = backgrounds[:]
+    random.shuffle(order)
+    cursors = {b: random.uniform(0, max(bg_durations[b] - 1, 0)) for b in backgrounds}
 
     segment_paths = []
     for i in range(n_chunks):
@@ -142,8 +155,12 @@ def main():
         if not os.path.exists(audio_path):
             print(f"ERROR: missing audio file {audio_path}", file=sys.stderr)
             sys.exit(1)
-        print(f"[assemble] rendering segment {i + 1}/{n_chunks}...")
-        make_segment(i, audio_path, boundaries_path, background_path, out_path)
+
+        bg = order[i % len(order)]
+        seek = cursors[bg]
+        print(f"[assemble] segment {i + 1}/{n_chunks}: {os.path.basename(bg)} @ {seek:.1f}s")
+        used = make_segment(i, audio_path, boundaries_path, bg, out_path, seek=seek)
+        cursors[bg] = (seek + used) % max(bg_durations[bg], 1.0)
         segment_paths.append(out_path)
 
     final_path = f"{BUILD_DIR}/output.mp4"
