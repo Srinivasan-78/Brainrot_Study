@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import glob
+import random
 import subprocess
 
 BACKGROUND_DIR = "assets"
@@ -36,7 +37,9 @@ def pick_background():
     if not candidates:
         print(f"ERROR: no background loop videos found in {BACKGROUND_DIR}/", file=sys.stderr)
         sys.exit(1)
-    return candidates[0]
+    choice = random.choice(candidates)
+    print(f"[assemble] background: {choice}")
+    return choice
 
 
 def srt_timestamp(seconds):
