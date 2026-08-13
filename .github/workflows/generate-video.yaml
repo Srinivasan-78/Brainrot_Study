@@ -44,6 +44,8 @@ jobs:
         run: python scripts/voice_gen.py
 
       - name: Assemble video
+        env:
+          BACKGROUND_GROUP: ${{ vars.BACKGROUND_GROUP }}
         run: python scripts/assemble.py
 
       - uses: actions/upload-artifact@v4
