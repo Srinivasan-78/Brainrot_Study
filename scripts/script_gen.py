@@ -45,23 +45,55 @@ def strip_fences(s):
     return s.strip()
 
 
-def call_gemini(prompt, api_key):
-    import google.generativeai as genai
-    from google.api_core import exceptions as gexc
+def resolve_gemini_model(client):
+    """Model names churn; prefer an env override, else discover a Flash model at runtime."""
+    override = os.environ.get("GEMINI_MODEL")
+    if override:
+        return override
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash", system_instruction=SYSTEM_PROMPT)
+    try:
+        names = [
+            m.name.replace("models/", "")
+            for m in client.models.list()
+            if "generateContent" in getattr(m, "supported_actions", []) or True
+        ]
+    except Exception as e:
+        print(f"[script_gen] WARNING: could not list Gemini models ({e}); using default", file=sys.stderr)
+        return "gemini-flash-latest"
+
+    flash = [n for n in names if "flash" in n and "lite" not in n and "image" not in n]
+    lite = [n for n in names if "flash" in n and "lite" in n]
+    pool = flash or lite or names
+    if not pool:
+        return "gemini-flash-latest"
+    chosen = sorted(pool, reverse=True)[0]
+    print(f"[script_gen] resolved Gemini model: {chosen}")
+    return chosen
+
+
+def call_gemini(prompt, api_key):
+    from google import genai
+    from google.genai import types, errors
+
+    client = genai.Client(api_key=api_key)
+    model_name = resolve_gemini_model(client)
 
     last_err = None
     for attempt in range(1, 3):
         try:
-            resp = model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json"},
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                ),
             )
             return strip_fences(resp.text)
-        except gexc.ResourceExhausted as e:
-            # specific rate-limit / quota-exceeded error only
+        except errors.ClientError as e:
+            code = getattr(e, "code", None) or getattr(e, "status_code", None)
+            if code != 429:
+                raise  # 404/400/403 are config errors — fail fast, don't burn retries
             last_err = e
             print(f"[script_gen] Gemini rate/quota limit hit (attempt {attempt}/2): {e}", file=sys.stderr)
             if attempt < 2:
@@ -70,7 +102,7 @@ def call_gemini(prompt, api_key):
 
 
 def call_deepseek(prompt, api_key):
-    from openai import OpenAI, RateLimitError
+    from openai import OpenAI, RateLimitError, APIStatusError
 
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
@@ -91,6 +123,13 @@ def call_deepseek(prompt, api_key):
             print(f"[script_gen] DeepSeek rate/quota limit hit (attempt {attempt}/2): {e}", file=sys.stderr)
             if attempt < 2:
                 time.sleep(5)
+        except APIStatusError as e:
+            if e.status_code == 402:
+                raise RuntimeError(
+                    "DeepSeek returned 402 Insufficient Balance — the account has no credit. "
+                    "Top it up at platform.deepseek.com or unset DEEPSEEK_API_KEY."
+                ) from e
+            raise
     raise last_err
 
 
